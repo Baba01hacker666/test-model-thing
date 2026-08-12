@@ -1,0 +1,220 @@
+import mlx.core as mx
+import mlx.nn as nn
+import mlx.optimizers as opt
+import mlx.utils as util
+
+class Encoder(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.embed = nn.Embedding(256, dim)
+        self.embedtrace = mx.zeros((256, dim))
+
+    def __call__(self, x: mx.array): return self.embed(x)
+
+class Decoder(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        self.decode = nn.Linear(dim, 256)
+        self.stop = nn.Linear(dim, 1)
+
+    def __call__(self, x: mx.array): return self.decode(x), mx.sigmoid(self.stop(x))
+
+class Layer(nn.Module):
+    def __init__(self, dim: int):
+        super().__init__()
+        
+        self.decay = mx.zeros((dim, ))
+        self.states = mx.zeros((dim, ))
+        self.decaytrace = mx.zeros((dim, ))
+        
+        self.norm = nn.LayerNorm(dim)
+        self.weights = nn.Linear(dim, dim, bias = False)
+        self.silu = nn.SiLU()
+
+    def __call__(self, x: mx.array, dummy: mx.array):
+        decay = mx.sigmoid(self.decay)
+        state = (decay * self.states) + x + dummy
+
+        return x + self.silu(self.weights(self.norm(state))), state, decay
+
+class Model(nn.Module):
+    def __init__(self, dim: int, layers: int, temp: float, lr: float):
+        super().__init__()
+        self.dim = dim
+        self.layercount = layers
+        self.temp = temp
+
+        self.encoder = Encoder(dim)
+        self.decoder = Decoder(dim)
+
+        self.layers = [Layer(dim) for _ in range(layers)]
+        self.optimizer = opt.AdamW(learning_rate = lr)
+
+    def sample(self, output: mx.array):
+        probs = mx.softmax(output)
+        entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(256))
+
+        temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
+        return mx.random.categorical(output / temp)
+
+    def __call__(self, currb: int, nextb: int | None, end: bool):
+        c = mx.array(currb)
+        p = self.trainable_parameters()
+
+        def fwd(params, dummies: list[mx.array]):
+            self.update(params)
+            x = self.encoder(c)
+
+            states, decays = [], []
+
+            for i, layer in enumerate(self.layers):
+                x, state, decay = layer(x, dummies[i])
+
+                states.append(state)
+                decays.append(decay)
+
+            output, stop = self.decoder(x)
+
+            loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4))
+            if nextb is not None:
+                n = mx.array(nextb)
+                tgt = mx.stop_gradient(self.encoder(n))
+
+                loss = loss + mx.mean(mx.square(x - tgt))
+                loss = loss - output[n] + mx.logsumexp(output)
+
+                loss = loss + mx.mean(mx.square(stop - mx.array([1.0 if end else 0.0])))
+
+            return loss, (states, decays, output, stop) # loss = variance loss + pred mse loss + crossentropy loss + stop mse loss
+
+        (_, (states, decays, output, stop)), (grads, dlds_s) = mx.value_and_grad(
+            fwd, argnums = (0, 1)
+        )(p, [mx.zeros((self.dim, )) for _ in range(self.layercount)])
+
+        self.update(p)
+
+        embedtrace = (self.encoder.embedtrace * decays[0]) + (mx.arange(256) == c)[:, None]
+        grads["encoder"]["embed"]["weight"] += dlds_s[0] * (self.encoder.embedtrace * decays[0])
+        self.encoder.embedtrace = mx.stop_gradient(embedtrace)
+        mx.eval(self.encoder.embedtrace)
+
+        for i, layer in enumerate(self.layers):
+            dlds = dlds_s[i]
+            
+            decaytrace = (decays[i] * layer.decaytrace) + (decays[i] * (1.0 - decays[i]) * layer.states)
+
+            grads["layers"][i]["decay"] = dlds * decaytrace
+
+            layer.states = mx.stop_gradient(states[i])
+            layer.decaytrace = mx.stop_gradient(decaytrace)
+
+            mx.eval(layer.states, layer.decaytrace)
+
+        self.optimizer.update(self, grads)
+        mx.eval(self.parameters(), self.optimizer.state)
+
+        return self.sample(output).item(), stop.item()
+
+    def save(self, path: str):
+        data = {}
+        for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
+        for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
+
+        data[f"embedtrace"] = self.encoder.embedtrace
+        for i, layer in enumerate(self.layers):
+            data[f"state.{i}"] = layer.states
+            data[f"decaytrace.{i}"] = layer.decaytrace
+            
+        mx.save_safetensors(path, data)
+
+    def load(self, path: str):
+        import os
+        if not os.path.exists(path): return
+
+        data, model, opts = mx.load(path), {}, {}
+        
+        for k, v in data.items():
+            if k.startswith("m."): model[k[2:]] = v
+            elif k.startswith("o."): opts[k[2:]] = v
+            elif k.startswith("state."): self.layers[int(k.split('.')[1])].states = v
+            elif k.startswith("decaytrace."): self.layers[int(k.split('.')[1])].decaytrace = v
+            elif k == "embedtrace": self.encoder.embedtrace = v
+            
+        if model: self.update(util.tree_unflatten(list(model.items())))
+        if opts: self.optimizer.state = util.tree_unflatten(list(opts.items()))
+
+class Runtime:
+    def __init__(self, path: str, threshold: float, **kwargs):
+        self.model = Model(**kwargs)
+        self.path = path
+        self.threshold = threshold
+        self.step = 0
+
+    def save(self):
+        self.step += 1
+        if self.step % 500 == 0: self.model.save(self.path)
+
+    def call(self, c: int, n: int | None, end: bool):
+        outputs = self.model(c, n, end)
+        self.save()
+        return outputs
+
+    def write(self, b: int):
+        import sys
+        sys.stdout.buffer.write(bytes([b]))
+        sys.stdout.flush()
+
+    def chat(self):
+        import itertools
+
+        while True:
+            text = input(f'\n[{self.now()}]\nUser >> ')
+            data = (text + '\n').encode('utf-8')
+            
+            for i, (c, n) in enumerate(itertools.pairwise(data)):
+                b, _ = self.call(c, n, i == len(data) - 2)
+
+            print(f'\n[{self.now()}]\nModel >> ', end = '', flush = True)
+
+            b = data[-1]
+            while True:
+                b, stop = self.call(b, None, False)
+                self.write(b)
+                if stop > self.threshold: break
+
+    def dataset(self):
+        import glob, itertools
+        files = glob.glob('wikipedia_clean/**/wiki_*', recursive = True)
+
+        while True:
+            for file in files:
+                with open(file, 'r', encoding = 'utf-8', errors = 'ignore') as f:
+                    for line in f:
+                        data = line.encode('utf-8')
+                        for i, (c, n) in enumerate(itertools.pairwise(data)):
+                            b, _ = self.call(c, n, i == len(data) - 2)
+                            self.write(b)
+
+    def now(self):
+        from datetime import datetime
+        return datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
+
+    def __call__(self):
+        try: mode = bool(int(input(f'\n[{self.now()}]\nmode >> ')))
+        except ValueError:
+            print('\nInvalid mode.')
+            return
+
+        self.model.load(self.path)
+        print()
+
+        try:
+            match mode:
+                case False: self.dataset()
+                case True: self.chat()
+
+        finally: self.model.save(self.path)
+
+if __name__ == '__main__':
+    Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
+    # param count = (256 * dim) + (dim * dim + dim * 2 + dim) + (256 * dim + dim + 1)
