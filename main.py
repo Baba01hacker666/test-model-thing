@@ -216,5 +216,6 @@ class Runtime:
         finally: self.model.save(self.path)
 
 if __name__ == '__main__':
-    Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
+    # Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
+    Runtime(path = 'smaller-4.5m.safetensors', threshold = 0.35, dim = 512, layers = 16, temp = 0.75, lr = 5e-4)()
     # param count = (256 * dim) + (dim * dim + dim * 2 + dim) + (256 * dim + dim + 1)
