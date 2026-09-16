@@ -57,8 +57,24 @@ class Model(nn.Module):
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp)
 
-    def __call__(self, currb: int, nextb: int | None, end: bool):
+    def __call__(self, currb: int, nextb: int | None, end: bool, notrace: bool = False):
         c = mx.array(currb)
+
+        if notrace:
+            x = self.encoder(c)
+            
+            states, decays = [], []
+
+            for i, layer in enumerate(self.layers):
+                x, state, decay = layer(x, mx.zeros((self.dim, )))
+
+                states.append(state)
+                decays.append(decay)
+
+            output, stop = self.decoder(x)
+
+            return self.sample(output).item(), stop.item()
+
         p = self.trainable_parameters()
 
         def fwd(params, dummies: list[mx.array]):
@@ -116,6 +132,8 @@ class Model(nn.Module):
         return self.sample(output).item(), stop.item()
 
     def save(self, path: str):
+        import os
+
         data = {}
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
         for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
@@ -124,8 +142,10 @@ class Model(nn.Module):
         for i, layer in enumerate(self.layers):
             data[f"state.{i}"] = layer.states
             data[f"decaytrace.{i}"] = layer.decaytrace
-            
-        mx.save_safetensors(path, data)
+
+        tmp = 'temporary-' + path
+        mx.save_safetensors(tmp, data)
+        os.replace(tmp, path)
 
     def load(self, path: str):
         import os
@@ -148,15 +168,17 @@ class Runtime:
         self.model = Model(**kwargs)
         self.path = path
         self.threshold = threshold
+
         self.step = 0
+        self.prevtime = None
 
     def save(self):
         self.step += 1
         if self.step % 500 == 0: self.model.save(self.path)
 
-    def call(self, c: int, n: int | None, end: bool):
-        outputs = self.model(c, n, end)
-        self.save()
+    def call(self, c: int, n: int | None, end: bool, readonly: bool = False, notrace: bool = False):
+        outputs = self.model(c, n, end, notrace)
+        if not readonly: self.save()
         return outputs
 
     def write(self, b: int):
@@ -164,23 +186,27 @@ class Runtime:
         sys.stdout.buffer.write(bytes([b]))
         sys.stdout.flush()
 
-    def chat(self):
-        import itertools
+    def chat(self, readonly: bool = False, notrace: bool = False):
+        import itertools, time
 
         while True:
-            text = input(f'\n[{self.now()}]\nUser >> ')
+            text = input(f'\n[{self.now()} | {0 if self.prevtime is None else time.time() - self.prevtime:.4f}s]\nUser >> ')
+            self.prevtime = time.time()
+
             data = (text + '\n').encode('utf-8')
             
             for i, (c, n) in enumerate(itertools.pairwise(data)):
-                b, _ = self.call(c, n, i == len(data) - 2)
+                b, _ = self.call(c, n, i == len(data) - 2, readonly, notrace)
 
             print(f'\n[{self.now()}]\nModel >> ', end = '', flush = True)
 
             b = data[-1]
             while True:
-                b, stop = self.call(b, None, False)
+                b, stop = self.call(b, None, False, readonly, notrace)
                 self.write(b)
-                if stop > self.threshold: break
+                if stop > self.threshold:
+                    print()
+                    break
 
     def dataset(self):
         import glob, itertools
@@ -200,7 +226,9 @@ class Runtime:
         return datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
 
     def __call__(self):
-        try: mode = bool(int(input(f'\n[{self.now()}]\nmode >> ')))
+        modes = ['train', 'chat', 'chatreadonly', 'chatnotrace']
+
+        try: mode = modes.index(input(f'\nthe \'chatnotrace\' mode is there for bug testing. \'chatreadonly\' is for chatting without overriding weights.\n[{self.now()}]\nmode: {modes} >> ').lower())
         except ValueError:
             print('\nInvalid mode.')
             return
@@ -210,10 +238,13 @@ class Runtime:
 
         try:
             match mode:
-                case False: self.dataset()
-                case True: self.chat()
+                case 0: self.dataset()
+                case 1: self.chat()
+                case 2: self.chat(readonly = True)
+                case 3: self.chat(readonly = True, notrace = True)
 
-        finally: self.model.save(self.path)
+        finally:
+            if mode < 2: self.model.save(self.path)
 
 if __name__ == '__main__':
     # Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
