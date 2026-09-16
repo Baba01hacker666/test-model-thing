@@ -17,6 +17,8 @@ This model architecture was designed in about a month by me (a solo high school 
 
 Feel free to fork the training and benchmark code (everything is under MIT). I really encourage you to try things out, submit issues, and fork the repo.
 
+#### KEEP THE RTRL TRACE PASS RUNNING FOR EVERY BYTE to update memory! Otherwise the model immediately breaks down.
+
 <img width="499" height="497" alt="3f7f1530-c0c7-43c4-9981-30e9023a19fb" src="https://github.com/user-attachments/assets/eb7e5a97-09b5-4a7b-9484-eb898042e9dc" />
 
 ## Training your own model
