@@ -58,6 +58,14 @@ class Model(nn.Module):
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp)
 
+    def reset(self):
+        for layer in self.layers:
+            layer.decay = mx.zeros((self.dim, ))
+            layer.states = mx.zeros((self.dim, ))
+
+            layer.decaytrace = mx.zeros((self.dim, ))
+            layer.embedtrace = mx.zeros((256, self.dim))
+
     def step(self, c: mx.array, dummies: mx.array):
         enc = self.encoder(c)
         x = enc
@@ -241,5 +249,5 @@ class Runtime:
 
 if __name__ == '__main__':
     # Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
-    Runtime(path = 'experimental2-4.5m.safetensors', threshold = 0.35, dim = 512, layers = 16, temp = 0.75, lr = 5e-4)()
+    Runtime(path = 'experimental-4.5m.safetensors', threshold = 0.35, dim = 512, layers = 16, temp = 0.75, lr = 5e-4)()
     # param count = (256 * dim) + (dim * dim + dim * 2 + dim) + (256 * dim + dim + 1)
