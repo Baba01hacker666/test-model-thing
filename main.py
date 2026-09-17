@@ -7,7 +7,6 @@ class Encoder(nn.Module):
     def __init__(self, dim: int):
         super().__init__()
         self.embed = nn.Embedding(256, dim)
-        self.embedtrace = mx.zeros((256, dim))
 
     def __call__(self, x: mx.array): return self.embed(x)
 
@@ -25,15 +24,17 @@ class Layer(nn.Module):
         
         self.decay = mx.zeros((dim, ))
         self.states = mx.zeros((dim, ))
+
         self.decaytrace = mx.zeros((dim, ))
+        self.embedtrace = mx.zeros((256, dim))
         
         self.norm = nn.LayerNorm(dim)
         self.weights = nn.Linear(dim, dim, bias = False)
         self.silu = nn.SiLU()
 
-    def __call__(self, x: mx.array, dummy: mx.array):
+    def __call__(self, enc: mx.array, x: mx.array, dummy: mx.array):
         decay = mx.sigmoid(self.decay)
-        state = (decay * self.states) + x + dummy
+        state = (decay * self.states) + enc + dummy
 
         return x + self.silu(self.weights(self.norm(state))), state, decay
 
@@ -57,49 +58,42 @@ class Model(nn.Module):
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
         return mx.random.categorical(output / temp)
 
+    def step(self, c: mx.array, dummies: mx.array):
+        enc = self.encoder(c)
+        x = enc
+            
+        states, decays = [], []
+
+        for i, layer in enumerate(self.layers):
+            x, state, decay = layer(enc, x, dummies[i])
+
+            states.append(state)
+            decays.append(decay)
+
+        return (x, states, decays), self.decoder(x)
+
     def __call__(self, currb: int, nextb: int | None, end: bool, notrace: bool = False):
         c = mx.array(currb)
 
         if notrace:
-            x = self.encoder(c)
-            
-            states, decays = [], []
-
-            for i, layer in enumerate(self.layers):
-                x, state, decay = layer(x, mx.zeros((self.dim, )))
-
-                states.append(state)
-                decays.append(decay)
-
-            output, stop = self.decoder(x)
-
+            _, (output, stop) = self.step(c, [mx.zeros((self.dim, )) for _ in range(self.layercount)])
             return self.sample(output).item(), stop.item()
 
         p = self.trainable_parameters()
 
         def fwd(params, dummies: list[mx.array]):
             self.update(params)
-            x = self.encoder(c)
+            (x, states, decays), (output, stop) = self.step(c, dummies)
 
-            states, decays = [], []
-
-            for i, layer in enumerate(self.layers):
-                x, state, decay = layer(x, dummies[i])
-
-                states.append(state)
-                decays.append(decay)
-
-            output, stop = self.decoder(x)
-
-            loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4))
+            loss = mx.maximum(0.0, 1.0 - mx.sqrt(mx.var(x) + 1e-4)) # variance
             if nextb is not None:
                 n = mx.array(nextb)
                 tgt = mx.stop_gradient(self.encoder(n))
 
-                loss = loss + mx.mean(mx.square(x - tgt))
-                loss = loss - output[n] + mx.logsumexp(output)
+                loss = loss + mx.mean(mx.square(x - tgt)) # pred mse
+                loss = loss - output[n] + mx.logsumexp(output) # ce
 
-                loss = loss + mx.mean(mx.square(stop - mx.array([1.0 if end else 0.0])))
+                loss = loss + mx.mean(mx.square(stop - mx.array([1.0 if end else 0.0]))) # stop mse
 
             return loss, (states, decays, output, stop) # loss = variance loss + pred mse loss + crossentropy loss + stop mse loss
 
@@ -109,22 +103,21 @@ class Model(nn.Module):
 
         self.update(p)
 
-        embedtrace = (self.encoder.embedtrace * decays[0]) + (mx.arange(256) == c)[:, None]
-        grads["encoder"]["embed"]["weight"] += dlds_s[0] * (self.encoder.embedtrace * decays[0])
-        self.encoder.embedtrace = mx.stop_gradient(embedtrace)
-        mx.eval(self.encoder.embedtrace)
-
         for i, layer in enumerate(self.layers):
             dlds = dlds_s[i]
+
+            embedtrace = (layer.embedtrace * decays[i]) + (mx.arange(256) == c)[:, None]
+            grads["encoder"]["embed"]["weight"] += dlds * (layer.embedtrace * decays[i])
             
             decaytrace = (decays[i] * layer.decaytrace) + (decays[i] * (1.0 - decays[i]) * layer.states)
-
             grads["layers"][i]["decay"] = dlds * decaytrace
 
             layer.states = mx.stop_gradient(states[i])
-            layer.decaytrace = mx.stop_gradient(decaytrace)
 
-            mx.eval(layer.states, layer.decaytrace)
+            layer.decaytrace = mx.stop_gradient(decaytrace)
+            layer.embedtrace = mx.stop_gradient(embedtrace)
+            
+            mx.eval(layer.states, layer.decaytrace, layer.embedtrace)
 
         self.optimizer.update(self, grads)
         mx.eval(self.parameters(), self.optimizer.state)
@@ -138,10 +131,10 @@ class Model(nn.Module):
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
         for k, v in util.tree_flatten(self.optimizer.state): data[f"o.{k}"] = v
 
-        data[f"embedtrace"] = self.encoder.embedtrace
         for i, layer in enumerate(self.layers):
             data[f"state.{i}"] = layer.states
             data[f"decaytrace.{i}"] = layer.decaytrace
+            data[f"embedtrace.{i}"] = layer.embedtrace
 
         tmp = 'temporary-' + path
         mx.save_safetensors(tmp, data)
@@ -158,7 +151,7 @@ class Model(nn.Module):
             elif k.startswith("o."): opts[k[2:]] = v
             elif k.startswith("state."): self.layers[int(k.split('.')[1])].states = v
             elif k.startswith("decaytrace."): self.layers[int(k.split('.')[1])].decaytrace = v
-            elif k == "embedtrace": self.encoder.embedtrace = v
+            elif k.startswith("embedtrace."): self.layers[int(k.split('.')[1])].embedtrace = v
             
         if model: self.update(util.tree_unflatten(list(model.items())))
         if opts: self.optimizer.state = util.tree_unflatten(list(opts.items()))
@@ -248,5 +241,5 @@ class Runtime:
 
 if __name__ == '__main__':
     # Runtime(path = 'larger-130m.safetensors', threshold = 0.35, dim = 2048, layers = 32, temp = 0.75, lr = 5e-4)()
-    Runtime(path = 'smaller-4.5m.safetensors', threshold = 0.35, dim = 512, layers = 16, temp = 0.75, lr = 5e-4)()
+    Runtime(path = 'experimental2-4.5m.safetensors', threshold = 0.35, dim = 512, layers = 16, temp = 0.75, lr = 5e-4)()
     # param count = (256 * dim) + (dim * dim + dim * 2 + dim) + (256 * dim + dim + 1)
