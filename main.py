@@ -74,7 +74,7 @@ class Model(nn.Module):
             layer.decaytrace = mx.zeros((self.dim, ))
             layer.embedtrace = mx.zeros((256, self.dim))
 
-        mx.eval(*[l.states for l in self.layers])
+        mx.eval(*[layer.states for layer in self.layers])
 
     def step(self, c: mx.array, dummies: mx.array):
         enc = self.encoder(c)
