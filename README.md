@@ -21,7 +21,16 @@ Feel free to fork the training and benchmark code (everything is under MIT). I r
 
 ## Training your own model
 
-Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing ```mlx```, no other libraries needed, then running ```main.py```. When you run it, you will be prompted with the mode, ```train``` being train on dataset and ```chat``` being chat. There is also ```chatreadonly``` for readonly chat (the model weights will not re-save to disk and override things) and ```chatnotrace``` if you want to break things. You will have to configure your own dataset by modifying the code (to run dataset mode), but you should be able to run chat mode without modifying anything if you have weights already.
+Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing dependencies with ```pip install -r requirements.txt``` (just ```mlx```, no other libraries needed), then running ```main.py```.
+
+```bash
+python main.py --mode train --pattern 'wikipedia_clean/**/wiki_*'
+python main.py --mode chat
+python main.py --mode chatreadonly   # no weight updates, no disk writes
+python benchmark.py --path experimental-4.5m.safetensors
+```
+
+When you run it without ```--mode```, you will be prompted with the mode, ```train``` being train on dataset and ```chat``` being chat. There is also ```chatreadonly``` for readonly chat (no training updates and no re-save to disk) and ```chatnotrace``` if you want to break things. You will have to configure your own dataset by modifying the code (to run dataset mode), but you should be able to run chat mode without modifying anything if you have weights already.
 
 Once it begins training, you can safely ^C the program and it will save weights. It should also periodically save weights if I'm not mistaken. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
 
@@ -37,6 +46,10 @@ In detail, here are some of the main capabilities of the model that differ from 
 The two important hyperparameters are the size of the latent vector (dim) and the amount of individual state layers the latent passes through before decoding (layers). For my 4.5m test these are ```dim = 512``` and ```layers = 16```. There are some other configurations you can change but I think they are less important.
 
 For reproduction purposes the dataset I trained my model on is ```simplewiki-20260801-pages-articles.xml.bz2```, from the Wikipedia dumps.
+
+## Benchmark (CoLA)
+
+```benchmark.py``` freezes the backbone and trains a small linear probe on CoLA (Matthews correlation). Download CoLA from https://nyu-mll.github.io/CoLA/ so that ```CoLA/original/raw/in_domain_train.tsv``` exists, then run ```python benchmark.py```. A dev slice is held out automatically so the reported score reflects generalization.
 
 I think this probably will contribute to solving continual learning and memory but I need other people to review and verify my work! Please feel free to open GitHub issues to tell me what's wrong. If you have compute (e.g. you are a lab or just have GPUs lying around), feel free to fork my code and train larger models as well, with credit. I personally don't have enough compute and as such I can't really train very large models.
 

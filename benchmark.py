@@ -1,7 +1,8 @@
+import math
+
 import mlx.core as mx
 import mlx.nn as nn
 import mlx.optimizers as opt
-import mlx.utils as util
 
 from main import Model
 
@@ -26,13 +27,31 @@ def cola(filepath: str):
     return data
 
 def mcc(tp, tn, fp, fn):
-    import math
     denominator = math.sqrt((tp + fp) * (tp + fn) * (tn + fp) * (tn + fn))
 
     score = (tp * tn - fp * fn) / denominator if denominator != 0 else 0.0
     return score * 100
 
-def run(path: str):
+def encode_state(model: Model, b_s: bytes, dummies: list[mx.array]):
+    """Roll the frozen backbone over raw bytes, return last-layer state."""
+    model.reset()
+
+    final = None
+    for b in b_s:
+        enc = model.encoder(mx.array(b))
+        x = enc
+
+        for j, layer in enumerate(model.layers):
+            x, state, _ = layer(enc, x, dummies[j])
+            layer.states = mx.stop_gradient(state)
+
+        final = model.layers[-1].states
+
+    if final is not None:
+        mx.eval(final)
+    return final
+
+def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epochs: int = 3, dev_fraction: float = 0.1):
     model = Model(dim = 512, layers = 16, temp = 0.75, lr = 5e-4)
     model.load(path)
     model.freeze()
@@ -40,11 +59,16 @@ def run(path: str):
     head = Classification(model.dim)
     headopt = opt.AdamW(learning_rate = 1e-3)
 
-    data = cola('CoLA/original/raw/in_domain_train.tsv')
+    data = cola(cola_path)
 
     if data == []:
-        print('invalid CoLA dataset.')
+        print(f'invalid CoLA dataset at {cola_path!r}.')
+        print('Download it from https://nyu-mll.github.io/CoLA/ (e.g. CoLA.zip -> CoLA/original/raw/in_domain_train.tsv).')
         return
+
+    # Hold out a dev slice so we report generalization, not train fit.
+    split = int(len(data) * (1.0 - dev_fraction))
+    train, dev = data[:split], data[split:]
 
     def lossfn(params, state: mx.array, target: int):
         head.update(params)
@@ -53,25 +77,18 @@ def run(path: str):
         loss = nn.losses.cross_entropy(choice[None, :], mx.array([target])).mean()
         return loss, choice
 
-    for epoch in range(3):
+    for epoch in range(epochs):
         print(f'\nEpoch {epoch + 1}')
 
         dummies = [mx.zeros((model.dim, )) for _ in range(model.layercount)]
         tp, tn, fp, fn = 0, 0, 0, 0
-        
-        for i, (b_s, label) in enumerate(data):
-            model.reset()
 
-            final = None
-            for b in b_s:
-                enc = model.encoder(mx.array(b))
-                x = enc
-
-                for j, layer in enumerate(model.layers):
-                    x, state, _ = layer(enc, x, dummies[j])
-                    layer.states = mx.stop_gradient(state)
-
-                final = model.layers[-1].states
+        for i, (b_s, label) in enumerate(train):
+            if len(b_s) == 0:
+                continue
+            final = encode_state(model, b_s, dummies)
+            if final is None:
+                continue
 
             (_, choice), grads = mx.value_and_grad(lossfn, argnums = 0)(head.trainable_parameters(), final, label)
 
@@ -88,7 +105,32 @@ def run(path: str):
 
             if i > 0 and i % 500 == 0: print(f'{i}: T+ {tp}, T- {tn}, F+ {fp}, F- {fn} ({score:.4f})')
 
-        print(f'{i}: T+ {tp}, T- {tn}, F+ {fp}, F- {fn} ({score:.4f})')
+        print(f'train {len(train)}: T+ {tp}, T- {tn}, F+ {fp}, F- {fn} ({score:.4f})')
+
+        # Frozen dev evaluation (no head updates).
+        dtp, dtn, dfp, dfn = 0, 0, 0, 0
+        for b_s, label in dev:
+            if len(b_s) == 0:
+                continue
+            final = encode_state(model, b_s, dummies)
+            if final is None:
+                continue
+            choice = head(final)
+            predicted_class = mx.argmax(choice).item()
+            if predicted_class == 1 and label == 1: dtp += 1
+            elif predicted_class == 0 and label == 0: dtn += 1
+            elif predicted_class == 1 and label == 0: dfp += 1
+            elif predicted_class == 0 and label == 1: dfn += 1
+        print(f'dev {len(dev)}: T+ {dtp}, T- {dtn}, F+ {dfp}, F- {dfn} ({mcc(dtp, dtn, dfp, dfn):.4f})')
 
 if __name__ == '__main__':
-    run('experimental-4.5m.safetensors')
+    import argparse
+
+    parser = argparse.ArgumentParser(description='CoLA probe for a frozen TMT backbone.')
+    parser.add_argument('--path', default='experimental-4.5m.safetensors')
+    parser.add_argument('--cola-path', default='CoLA/original/raw/in_domain_train.tsv')
+    parser.add_argument('--epochs', type=int, default=3)
+    parser.add_argument('--dev-fraction', type=float, default=0.1)
+    args = parser.parse_args()
+
+    run(args.path, args.cola_path, args.epochs, args.dev_fraction)
