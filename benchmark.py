@@ -1,4 +1,5 @@
 import math
+import os
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -52,6 +53,12 @@ def encode_state(model: Model, b_s: bytes, dummies: list[mx.array]):
     return final
 
 def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epochs: int = 3, dev_fraction: float = 0.1):
+    if not os.path.exists(path):
+        raise FileNotFoundError(
+            f"Checkpoint not found at {path!r}. Train a model first "
+            f"(python main.py --mode train) or pass --path to an existing .safetensors file."
+        )
+
     model = Model(dim = 512, layers = 16, temp = 0.75, lr = 5e-4)
     model.load(path)
     model.freeze()
@@ -66,8 +73,17 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
         print('Download it from https://nyu-mll.github.io/CoLA/ (e.g. CoLA.zip -> CoLA/original/raw/in_domain_train.tsv).')
         return
 
+    if not 0.0 <= dev_fraction < 1.0:
+        raise ValueError(f'dev_fraction must be in [0.0, 1.0), got {dev_fraction!r}.')
+    if len(data) < 2:
+        raise ValueError(f'Need at least 2 usable CoLA rows, got {len(data)}.')
+
     # Hold out a dev slice so we report generalization, not train fit.
     split = int(len(data) * (1.0 - dev_fraction))
+    if not 1 <= split < len(data):
+        raise ValueError(
+            f'dev_fraction={dev_fraction!r} leaves no usable split for {len(data)} rows.'
+        )
     train, dev = data[:split], data[split:]
 
     def lossfn(params, state: mx.array, target: int):
@@ -82,6 +98,7 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
 
         dummies = [mx.zeros((model.dim, )) for _ in range(model.layercount)]
         tp, tn, fp, fn = 0, 0, 0, 0
+        score = 0.0
 
         for i, (b_s, label) in enumerate(train):
             if len(b_s) == 0:

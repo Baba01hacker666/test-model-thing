@@ -142,6 +142,25 @@ class Model(nn.Module):
 
         return self.sample(output).item(), stop.item()
 
+    def infer(self, currb: int):
+        """Stateful inference: advance recurrent memory, no weight/trace updates.
+
+        Used for readonly chat — the model still remembers the conversation
+        via layer.states, but weights, traces, and optimizer state are untouched.
+        """
+        c = mx.array(currb)
+        enc = self.encoder(c)
+        x = enc
+
+        dummies = [mx.zeros((self.dim, )) for _ in range(self.layercount)]
+        for i, layer in enumerate(self.layers):
+            x, state, _ = layer(enc, x, dummies[i])
+            layer.states = mx.stop_gradient(state)
+
+        mx.eval(*[layer.states for layer in self.layers])
+        output, stop = self.decoder(x)
+        return self.sample(output).item(), stop.item()
+
     def save(self, path: str):
         data = {}
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
@@ -185,12 +204,14 @@ class Runtime:
         if self.step % 500 == 0: self.model.save(self.path)
 
     def call(self, c: int, n: int | None, end: bool, readonly: bool = False, notrace: bool = False):
-        # Readonly means no weight updates at all (previously it still trained
-        # in memory and only skipped the disk save). Force inference-only path.
+        # notrace: fully stateless debug path (no memory, no training).
+        # readonly: stateful inference — memory advances, weights frozen, no disk save.
+        if notrace:
+            return self.model(c, n, end, notrace=True)
         if readonly:
-            notrace = True
+            return self.model.infer(c)
         outputs = self.model(c, n, end, notrace)
-        if not readonly: self.save()
+        self.save()
         return outputs
 
     def write(self, b: int):
