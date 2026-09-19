@@ -3,13 +3,14 @@
 [YouTube Video](https://youtu.be/9UERVVwpNew)
 
 This is a small proof-of-concept language model (not an LLM) that incorporates the following (and some smaller features as well):
-* Latent-space prediction
+* Latent-space prediction (JEPA style)
 * Internal state + recurrent trace units (RTUs)
-* Byte input/output
+* Byte input/output ($V = 256$)
 * Continuous data streaming
-* Test-time training
+* Test-time training & continual learning
+* Modular CLI tool (`tmt`) in pure NumPy with automated tests and bundled sample datasets
 
-The model is built with MLX, so it should run fine on all Apple Silicon devices. MLX on Linux has not been tested, but feel free to try it.
+The model engine is built with pure **NumPy**, running natively across all platforms (Linux, macOS, Windows, and Android/Termux) without requiring Apple Silicon or heavy framework dependencies.
 
 Being a proof of concept I have only trained a 4.5-million parameter model (keep in mind, GPT-1 was ~117m) for about 12 hours, but there are very promising results. The model tends to misspell characters (since it outputs byte-by-byte, rather than token-by-token) but it is able to close quotes/brackets and such. Given further training and scaling up the hyperparameters this could become much more powerful. My dataset is also tiny (only a few hundred MB), so there's a lot more world knowledge that can be fed into the model.
 
@@ -19,9 +20,57 @@ Feel free to fork the training and benchmark code (everything is under MIT). I r
 
 <img width="499" height="497" alt="3f7f1530-c0c7-43c4-9981-30e9023a19fb" src="https://github.com/user-attachments/assets/eb7e5a97-09b5-4a7b-9484-eb898042e9dc" />
 
-## Training your own model
+---
 
-Model weights (in ```.safetensors```) are not provided because GitHub doesn't like very large files. But, you can train your own model simply by initializing a ```venv``` and installing dependencies with ```pip install -r requirements.txt``` (just ```mlx```, no other libraries needed), then running ```main.py```.
+## Quick Start
+
+```bash
+# 1. Setup virtual environment
+python3 -m venv .venv
+source .venv/bin/activate
+
+# 2. Install dependencies & CLI
+pip install -e .
+
+# 3. Verify CLI and view model info
+tmt info
+```
+
+---
+
+## Modular CLI (`tmt`)
+
+TMT provides a unified command line interface:
+
+```bash
+# Smoke test: train for 200 steps on bundled sample data
+tmt train --sample --steps 200
+
+# Train on custom text dataset or glob
+tmt train --data 'wikipedia_clean/**/wiki_*' --path experimental-4.5m.safetensors
+
+# Interactive chat with in-memory learning
+tmt chat --readonly
+
+# Interactive chat with frozen weights (memory still advances)
+tmt chat --frozen
+
+# One-shot prompt generation
+tmt chat --prompt "Hello world" --max-bytes 64
+
+# Run CoLA probe benchmark on bundled sample data
+tmt benchmark --sample
+
+# Inspect workspace status and checkpoints
+tmt status
+
+# Run the automated test suite
+tmt test -v
+```
+
+### Backwards Compatibility
+
+All original commands continue to work seamlessly:
 
 ```bash
 python main.py --mode train --pattern 'wikipedia_clean/**/wiki_*'
@@ -31,9 +80,33 @@ python main.py --mode chat --frozen  # no in-memory training either
 python benchmark.py --path experimental-4.5m.safetensors
 ```
 
-```--mode``` is required: ```train``` trains on the dataset, ```chat``` chats with continual training. There is also ```chatreadonly``` for readonly chat (still trains weights in memory, but will not re-save to disk) and ```chatnotrace``` if you want to break things. Pass ```--frozen``` with any chat mode to disable in-memory training as well. You will have to configure your own dataset by modifying the code (to run dataset mode), but you should be able to run chat mode without modifying anything if you have weights already.
+---
 
-Once it begins training, you can safely ^C the program and it will save weights. It should also periodically save weights if I'm not mistaken. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
+## Testing & Sample Datasets
+
+Lightweight testing datasets are included directly in `data/samples/` so you can train and evaluate instantly:
+- `data/samples/sample_text.txt`: Sample text for immediate training tests (`tmt train --sample`).
+- `data/samples/sample_cola.tsv`: Sample CoLA TSV for probe evaluation tests (`tmt benchmark --sample`).
+
+To run the complete automated test suite:
+```bash
+pytest -v
+# or via the CLI:
+tmt test
+```
+
+---
+
+## Documentation
+
+Full documentation is available in the [`docs/`](docs/) directory:
+- [Architecture Overview](docs/overview.md)
+- [CLI Reference Guide](docs/cli.md)
+- [Datasets & Reproduction Guide](docs/datasets.md)
+- [Python API Reference](docs/api.md)
+- [NumPy Migration Notes](docs/migration_numpy.md)
+
+---
 
 ## How it works
 
@@ -50,9 +123,13 @@ For reproduction purposes the dataset I trained my model on is ```simplewiki-202
 
 ## Benchmark (CoLA)
 
-```benchmark.py``` freezes the backbone and trains a small linear probe on CoLA (Matthews correlation). Download CoLA from https://nyu-mll.github.io/CoLA/ so that ```CoLA/original/raw/in_domain_train.tsv``` exists, then run ```python benchmark.py```. A dev slice is held out automatically so the reported score reflects generalization.
+```tmt benchmark``` freezes the backbone and trains a small linear probe on CoLA (Matthews correlation). Download CoLA from https://nyu-mll.github.io/CoLA/ so that ```CoLA/original/raw/in_domain_train.tsv``` exists, then run:
 
-I think this probably will contribute to solving continual learning and memory but I need other people to review and verify my work! Please feel free to open GitHub issues to tell me what's wrong. If you have compute (e.g. you are a lab or just have GPUs lying around), feel free to fork my code and train larger models as well, with credit. I personally don't have enough compute and as such I can't really train very large models.
+```bash
+tmt benchmark --data CoLA/original/raw/in_domain_train.tsv
+```
+
+A dev slice is held out automatically so the reported score reflects generalization.
 
 Below is an approximate flow chart of the model architecture, made in Apple's Freeform app (excluding the wrapper for dataset cleaning and input/output handling) for reference. Note that the arrow connecting the target latent to the CE loss should instead be the target byte to the CE loss.
 

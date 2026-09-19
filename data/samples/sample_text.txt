@@ -1,0 +1,10 @@
+The quick brown fox jumps over the lazy dog.
+A byte-level recurrent model processes raw binary inputs one byte at a time.
+Internal state and recurrent trace units allow memory to decay smoothly across steps.
+Machine learning models benefit from standardized evaluation suites and test benchmarks.
+Natural language contains structure, punctuation, quotes ("hello world"), and brackets [like this].
+Wikipedia provides clean text data for training language models across domains.
+Inference can be run in readonly mode without saving intermediate checkpoints to disk.
+Continuous data streaming enables processing unbounded text without fixed context windows.
+Matthews correlation coefficient evaluates binary classification quality on imbalanced sets.
+Test-Model-Thing is a proof-of-concept architecture exploring latent-space byte prediction.

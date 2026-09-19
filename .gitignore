@@ -3,7 +3,13 @@
 /wikipedia_clean/
 /CoLA/
 *.xml.bz2
-/__pycache__/
+__pycache__/
+*.pyc
 *.pipe
 *.DS_Store
 *.safetensors
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+temporary-*

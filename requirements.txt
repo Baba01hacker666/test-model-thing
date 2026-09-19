@@ -1,1 +1,2 @@
-mlx
+numpy>=1.26.0
+safetensors>=0.4.0
