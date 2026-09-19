@@ -60,7 +60,6 @@ class Model(nn.Module):
 
     def sample(self, output: mx.array):
         probs = mx.softmax(output)
-        # Normalized entropy in [0, 1] (float array avoids int-log dtype issues).
         entropy = -mx.sum(probs * mx.log(probs + 1e-8)) / mx.log(mx.array(256.0))
 
         temp = mx.maximum(0.1, self.temp * (1.0 - self.temp * entropy)).item()
@@ -90,11 +89,23 @@ class Model(nn.Module):
 
         return (x, states, decays), self.decoder(x)
 
-    def __call__(self, currb: int, nextb: int | None, end: bool, notrace: bool = False):
+    def __call__(self, currb: int, nextb: int | None, end: bool, notrace: bool = False, frozen: bool = False):
         c = mx.array(currb)
 
         if notrace:
             _, (output, stop) = self.step(c, [mx.zeros((self.dim, )) for _ in range(self.layercount)])
+            return self.sample(output).item(), stop.item()
+
+        if frozen:
+            enc = self.encoder(c)
+            x = enc
+
+            for layer in self.layers:
+                x, state, _ = layer(enc, x, mx.zeros((self.dim, )))
+                layer.states = mx.stop_gradient(state)
+
+            mx.eval(*[layer.states for layer in self.layers])
+            output, stop = self.decoder(x)
             return self.sample(output).item(), stop.item()
 
         p = self.trainable_parameters()
@@ -142,25 +153,6 @@ class Model(nn.Module):
 
         return self.sample(output).item(), stop.item()
 
-    def infer(self, currb: int):
-        """Stateful inference: advance recurrent memory, no weight/trace updates.
-
-        Used for readonly chat — the model still remembers the conversation
-        via layer.states, but weights, traces, and optimizer state are untouched.
-        """
-        c = mx.array(currb)
-        enc = self.encoder(c)
-        x = enc
-
-        dummies = [mx.zeros((self.dim, )) for _ in range(self.layercount)]
-        for i, layer in enumerate(self.layers):
-            x, state, _ = layer(enc, x, dummies[i])
-            layer.states = mx.stop_gradient(state)
-
-        mx.eval(*[layer.states for layer in self.layers])
-        output, stop = self.decoder(x)
-        return self.sample(output).item(), stop.item()
-
     def save(self, path: str):
         data = {}
         for k, v in util.tree_flatten(self.parameters()): data[f"m.{k}"] = v
@@ -203,22 +195,18 @@ class Runtime:
         self.step += 1
         if self.step % 500 == 0: self.model.save(self.path)
 
-    def call(self, c: int, n: int | None, end: bool, readonly: bool = False, notrace: bool = False):
-        # notrace: fully stateless debug path (no memory, no training).
-        # readonly: stateful inference — memory advances, weights frozen, no disk save.
-        if notrace:
-            return self.model(c, n, end, notrace=True)
-        if readonly:
-            return self.model.infer(c)
+    def call(self, c: int, n: int | None, end: bool, readonly: bool = False, notrace: bool = False, frozen: bool = False):
+        if frozen:
+            return self.model(c, n, end, frozen = True)
         outputs = self.model(c, n, end, notrace)
-        self.save()
+        if not readonly: self.save()
         return outputs
 
     def write(self, b: int):
         sys.stdout.buffer.write(bytes([b]))
         sys.stdout.flush()
 
-    def chat(self, readonly: bool = False, notrace: bool = False):
+    def chat(self, readonly: bool = False, notrace: bool = False, frozen: bool = False):
         while True:
             text = input(f'\n[{self.now()} | {0 if self.prevtime is None else time.time() - self.prevtime:.4f}s]\nUser >> ')
             self.prevtime = time.time()
@@ -226,13 +214,13 @@ class Runtime:
             data = (text + '\n').encode('utf-8')
             
             for i, (c, n) in enumerate(itertools.pairwise(data)):
-                b, _ = self.call(c, n, i == len(data) - 2, readonly, notrace)
+                b, _ = self.call(c, n, i == len(data) - 2, readonly, notrace, frozen)
 
             print(f'\n[{self.now()}]\nModel >> ', end = '', flush = True)
 
             b = data[-1]
             while True:
-                b, stop = self.call(b, None, False, readonly, notrace)
+                b, stop = self.call(b, None, False, readonly, notrace, frozen)
                 self.write(b)
                 if stop > self.threshold:
                     print()
@@ -262,19 +250,13 @@ class Runtime:
     def now(self):
         return datetime.now().strftime('%d/%m/%Y, %H:%M:%S')
 
-    def __call__(self, mode: str | None = None):
+    def __call__(self, mode: str, frozen: bool = False):
         modes = ['train', 'chat', 'chatreadonly', 'chatnotrace']
 
-        if mode is None:
-            try: mode = modes.index(input(f'\nthe \'chatnotrace\' mode is there for bug testing. \'chatreadonly\' is for chatting without overriding weights.\n[{self.now()}]\nmode: {modes} >> ').lower())
-            except ValueError:
-                print('\nInvalid mode.')
-                return
-        else:
-            if mode not in modes:
-                print(f'\nInvalid mode {mode!r}. Choose from {modes}.')
-                return
-            mode = modes.index(mode)
+        if mode not in modes:
+            print(f'\nInvalid mode {mode!r}. Choose from {modes}.')
+            return
+        mode = modes.index(mode)
 
         self.model.load(self.path)
         print()
@@ -282,16 +264,14 @@ class Runtime:
         try:
             match mode:
                 case 0: self.dataset()
-                case 1: self.chat()
-                case 2: self.chat(readonly = True)
+                case 1: self.chat(frozen = frozen)
+                case 2: self.chat(readonly = True, frozen = frozen)
                 case 3: self.chat(readonly = True, notrace = True)
 
         finally:
-            if mode in (0, 1): self.model.save(self.path)
+            if mode in (0, 1) and not frozen: self.model.save(self.path)
 
 def count_params(dim: int, layers: int) -> int:
-    # embed (256*dim) + per-layer (norm 2*dim + fc dim*dim + decay dim)
-    # + decoder (dim*256 + 256 bias + dim*1 + 1 bias)
     per_layer = dim * dim + 3 * dim
     return 256 * dim + layers * per_layer + 256 * dim + 256 + dim + 1
 
@@ -299,7 +279,8 @@ if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='Test-Model-Thing: byte-level recurrent LM with MLX.')
-    parser.add_argument('--mode', choices=['train', 'chat', 'chatreadonly', 'chatnotrace'], default=None)
+    parser.add_argument('--mode', choices=['train', 'chat', 'chatreadonly', 'chatnotrace'], required=True)
+    parser.add_argument('--frozen', action='store_true', help='Chat without any in-memory training (weights frozen, memory still advances).')
     parser.add_argument('--path', default='experimental-4.5m.safetensors')
     parser.add_argument('--threshold', type=float, default=0.35)
     parser.add_argument('--dim', type=int, default=512)
@@ -321,4 +302,4 @@ if __name__ == '__main__':
         finally:
             runtime.model.save(runtime.path)
     else:
-        runtime(args.mode)
+        runtime(args.mode, frozen = args.frozen)

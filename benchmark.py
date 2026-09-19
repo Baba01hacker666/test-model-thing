@@ -33,8 +33,7 @@ def mcc(tp, tn, fp, fn):
     score = (tp * tn - fp * fn) / denominator if denominator != 0 else 0.0
     return score * 100
 
-def encode_state(model: Model, b_s: bytes, dummies: list[mx.array]):
-    """Roll the frozen backbone over raw bytes, return last-layer state."""
+def rollout(model: Model, b_s: bytes, dummies: list[mx.array]):
     model.reset()
 
     final = None
@@ -52,7 +51,7 @@ def encode_state(model: Model, b_s: bytes, dummies: list[mx.array]):
         mx.eval(final)
     return final
 
-def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epochs: int = 3, dev_fraction: float = 0.1):
+def run(path: str, data: str = 'CoLA/original/raw/in_domain_train.tsv', epochs: int = 3, dev: float = 0.1):
     if not os.path.exists(path):
         raise FileNotFoundError(
             f"Checkpoint not found at {path!r}. Train a model first "
@@ -66,25 +65,24 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
     head = Classification(model.dim)
     headopt = opt.AdamW(learning_rate = 1e-3)
 
-    data = cola(cola_path)
+    rows = cola(data)
 
-    if data == []:
-        print(f'invalid CoLA dataset at {cola_path!r}.')
+    if rows == []:
+        print(f'invalid CoLA dataset at {data!r}.')
         print('Download it from https://nyu-mll.github.io/CoLA/ (e.g. CoLA.zip -> CoLA/original/raw/in_domain_train.tsv).')
         return
 
-    if not 0.0 <= dev_fraction < 1.0:
-        raise ValueError(f'dev_fraction must be in [0.0, 1.0), got {dev_fraction!r}.')
-    if len(data) < 2:
-        raise ValueError(f'Need at least 2 usable CoLA rows, got {len(data)}.')
+    if not 0.0 <= dev < 1.0:
+        raise ValueError(f'dev must be in [0.0, 1.0), got {dev!r}.')
+    if len(rows) < 2:
+        raise ValueError(f'Need at least 2 usable CoLA rows, got {len(rows)}.')
 
-    # Hold out a dev slice so we report generalization, not train fit.
-    split = int(len(data) * (1.0 - dev_fraction))
-    if not 1 <= split < len(data):
+    split = int(len(rows) * (1.0 - dev))
+    if not 1 <= split < len(rows):
         raise ValueError(
-            f'dev_fraction={dev_fraction!r} leaves no usable split for {len(data)} rows.'
+            f'dev={dev!r} leaves no usable split for {len(rows)} rows.'
         )
-    train, dev = data[:split], data[split:]
+    train, heldout = rows[:split], rows[split:]
 
     def lossfn(params, state: mx.array, target: int):
         head.update(params)
@@ -103,7 +101,7 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
         for i, (b_s, label) in enumerate(train):
             if len(b_s) == 0:
                 continue
-            final = encode_state(model, b_s, dummies)
+            final = rollout(model, b_s, dummies)
             if final is None:
                 continue
 
@@ -126,10 +124,10 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
 
         # Frozen dev evaluation (no head updates).
         dtp, dtn, dfp, dfn = 0, 0, 0, 0
-        for b_s, label in dev:
+        for b_s, label in heldout:
             if len(b_s) == 0:
                 continue
-            final = encode_state(model, b_s, dummies)
+            final = rollout(model, b_s, dummies)
             if final is None:
                 continue
             choice = head(final)
@@ -138,16 +136,16 @@ def run(path: str, cola_path: str = 'CoLA/original/raw/in_domain_train.tsv', epo
             elif predicted_class == 0 and label == 0: dtn += 1
             elif predicted_class == 1 and label == 0: dfp += 1
             elif predicted_class == 0 and label == 1: dfn += 1
-        print(f'dev {len(dev)}: T+ {dtp}, T- {dtn}, F+ {dfp}, F- {dfn} ({mcc(dtp, dtn, dfp, dfn):.4f})')
+        print(f'dev {len(heldout)}: T+ {dtp}, T- {dtn}, F+ {dfp}, F- {dfn} ({mcc(dtp, dtn, dfp, dfn):.4f})')
 
 if __name__ == '__main__':
     import argparse
 
     parser = argparse.ArgumentParser(description='CoLA probe for a frozen TMT backbone.')
     parser.add_argument('--path', default='experimental-4.5m.safetensors')
-    parser.add_argument('--cola-path', default='CoLA/original/raw/in_domain_train.tsv')
+    parser.add_argument('--data', default='CoLA/original/raw/in_domain_train.tsv')
     parser.add_argument('--epochs', type=int, default=3)
-    parser.add_argument('--dev-fraction', type=float, default=0.1)
+    parser.add_argument('--dev', type=float, default=0.1)
     args = parser.parse_args()
 
-    run(args.path, args.cola_path, args.epochs, args.dev_fraction)
+    run(args.path, args.data, args.epochs, args.dev)

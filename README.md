@@ -26,11 +26,12 @@ Model weights (in ```.safetensors```) are not provided because GitHub doesn't li
 ```bash
 python main.py --mode train --pattern 'wikipedia_clean/**/wiki_*'
 python main.py --mode chat
-python main.py --mode chatreadonly   # no weight updates, no disk writes
+python main.py --mode chatreadonly   # still trains in memory, skips disk save
+python main.py --mode chat --frozen  # no in-memory training either
 python benchmark.py --path experimental-4.5m.safetensors
 ```
 
-When you run it without ```--mode```, you will be prompted with the mode, ```train``` being train on dataset and ```chat``` being chat. There is also ```chatreadonly``` for readonly chat (no training updates and no re-save to disk) and ```chatnotrace``` if you want to break things. You will have to configure your own dataset by modifying the code (to run dataset mode), but you should be able to run chat mode without modifying anything if you have weights already.
+```--mode``` is required: ```train``` trains on the dataset, ```chat``` chats with continual training. There is also ```chatreadonly``` for readonly chat (still trains weights in memory, but will not re-save to disk) and ```chatnotrace``` if you want to break things. Pass ```--frozen``` with any chat mode to disable in-memory training as well. You will have to configure your own dataset by modifying the code (to run dataset mode), but you should be able to run chat mode without modifying anything if you have weights already.
 
 Once it begins training, you can safely ^C the program and it will save weights. It should also periodically save weights if I'm not mistaken. The saved weights include the internal memory so the model will remember that the next time it runs. You can launch into chat mode and the memory should carry on from whatever it was learning in training.
 
